@@ -1,0 +1,8 @@
+.vscode/
+.vs/
+bin/
+obj/
+artifacts/
+*.lscache
+*.json
+*.pdf
