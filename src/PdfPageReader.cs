@@ -1,6 +1,7 @@
 using System.Text.RegularExpressions;
 using UglyToad.PdfPig;
 using UglyToad.PdfPig.Content;
+using UglyToad.PdfPig.Core;
 
 namespace MntParser;
 
@@ -45,14 +46,25 @@ static partial class PdfPageReader
     var words = page.GetWords()
         .Where(word => !string.IsNullOrWhiteSpace(word.Text))
         .Select(word => new PositionedWord(TextCleaning.NormalizeInline(word.Text.Trim()), GetWordMidpointY(word), GetWordLeftX(word)))
-        .OrderByDescending(word => word.Y)
-        .ThenBy(word => word.X)
         .ToList();
+
+    foreach (var path in page.Paths)
+    {
+      if (!path.IsFilled || path.IsStroked || path.Count != 1
+          || !path[0].Commands.OfType<PdfSubpath.CubicBezierCurve>().Any()
+          || path.GetBoundingRectangle() is not { } bounds
+          || bounds.Width < 2 || bounds.Width > 5 || Math.Abs(bounds.Width - bounds.Height) > 0.2)
+        continue;
+
+      if (words.Any(word => word.X > bounds.Right && word.X - bounds.Right <= 20
+          && Math.Abs(word.Y - bounds.Centroid.Y) <= 3))
+        words.Add(new PositionedWord("\u2022", bounds.Centroid.Y, bounds.Left));
+    }
 
     var groups = new List<List<PositionedWord>>();
     const double yTolerance = 3.0;
 
-    foreach (var word in words)
+    foreach (var word in words.OrderByDescending(word => word.Y).ThenBy(word => word.X))
     {
       var group = groups.FirstOrDefault(candidate => Math.Abs(candidate[0].Y - word.Y) <= yTolerance);
       if (group is null)
@@ -79,7 +91,7 @@ static partial class PdfPageReader
   {
     return word.Letters.Count == 0
         ? 0
-        : word.Letters.Average(letter => (letter.BoundingBox.BottomLeft.Y + letter.BoundingBox.TopLeft.Y) / 2.0);
+        : word.Letters.Average(letter => letter.StartBaseLine.Y + letter.PointSize / 3.0);
   }
 
   private static double GetWordLeftX(Word word)

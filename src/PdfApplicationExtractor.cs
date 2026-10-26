@@ -11,18 +11,54 @@ static partial class PdfApplicationExtractor
         .ToList();
 
     var contentText = string.Join("\n\n", pages.Select(page => page.ContentText));
+    var fieldLines = allLines.SelectMany((line, index) =>
+    {
+      var match = InlineFieldPattern().Match(line.Text);
+      if (!match.Success)
+        return new[] { line };
 
-    var employmentHistoryLines = GetLinesBetween(allLines, "2. EMPLOYMENT HISTORY", "GAPS IN EMPLOYMENT HISTORY");
+      var label = match.Groups["label"].Value;
+      var value = match.Groups["value"].Value;
+      if (TextEquals(label, "Reason for Leaving:"))
+        value = TextCleaning.NormalizeInline(string.Join(' ', new[] { value }.Concat(allLines.Skip(index + 1)
+            .TakeWhile(next => !InlineFieldPattern().IsMatch(next.Text) && !next.Text.EndsWith(':')
+                && !NumberedSectionHeadingPattern().IsMatch(next.Text))
+            .Select(next => next.Text))));
+
+      if (TextEquals(label, "Start Date:"))
+      {
+        label = "Start Date: End Date:";
+        value = TextCleaning.NormalizeInline(value.Replace("End Date:", "", StringComparison.OrdinalIgnoreCase));
+      }
+
+      return new[]
+      {
+        new DocumentLine { PageNumber = line.PageNumber, Y = line.Y, Text = value },
+        new DocumentLine { PageNumber = line.PageNumber, Y = line.Y, Text = label },
+      };
+    }).ToList();
+
+    var employmentHistoryLines = GetLinesBetween(fieldLines, "2. EMPLOYMENT HISTORY", "GAPS IN EMPLOYMENT HISTORY");
     var employmentGapLines = GetLinesBetween(allLines, "GAPS IN EMPLOYMENT HISTORY", "3. UNIVERSITY DEGREES & DIPLOMAS");
-    var universityDegreeLines = GetLinesBetween(allLines, "3. UNIVERSITY DEGREES & DIPLOMAS", "4. SECONDARY/FURTHER EDUCATION");
-    var secondaryEducationLines = GetLinesBetween(allLines, "4. SECONDARY/FURTHER EDUCATION", "5. TRAINING & CONTINUED PROFESSIONAL DEVELOPMENT (CPD)");
-    var trainingLines = GetLinesBetween(allLines, "5. TRAINING & CONTINUED PROFESSIONAL DEVELOPMENT (CPD)", "6. PROFESSIONAL BODIES MEMBERSHIP");
-    var membershipLines = GetLinesBetween(allLines, "6. PROFESSIONAL BODIES MEMBERSHIP", "7. SUPPORTING STATEMENT");
+    if (employmentGapLines.Count == 0)
+      employmentGapLines = allLines
+          .SkipWhile(line => !LineEquals(line, "Any additional gaps not shown above, please give start date, end date and reason:"))
+          .TakeWhile(line => !LineEquals(line, "3. UNIVERSITY DEGREES & DIPLOMAS"))
+          .ToList();
+
+    var universityDegreeLines = GetLinesBetween(fieldLines, "3. UNIVERSITY DEGREES & DIPLOMAS", "4. SECONDARY/FURTHER EDUCATION");
+    var secondaryEducationLines = GetLinesBetween(fieldLines, "4. SECONDARY/FURTHER EDUCATION", "5. TRAINING & CONTINUED PROFESSIONAL DEVELOPMENT (CPD)");
+    var trainingLines = GetLinesBetween(fieldLines, "5. TRAINING & CONTINUED PROFESSIONAL DEVELOPMENT (CPD)", "6. PROFESSIONAL BODIES MEMBERSHIP");
+    var membershipLines = GetLinesBetween(fieldLines, "6. PROFESSIONAL BODIES MEMBERSHIP", "7. SUPPORTING STATEMENT");
     var supportingStatementLines = GetLinesBetween(allLines, "7. SUPPORTING STATEMENT", "8. REFEREES");
     var flexibleWorkingText = ExtractBetween(contentText, "FLEXIBLE WORKING", "Part 2: Personal Information & Declaration");
     var applicantText = ExtractBetween(contentText, "9. PERSONAL DETAILS", "TEACHER STATUS");
     var teacherStatusText = ExtractBetween(contentText, "TEACHER STATUS", "DISABILITY AND ACCESSIBILITY");
     var additionalInformationText = ExtractBetween(contentText, "10. ADDITIONAL INFORMATION", "DISCLOSURE AND BARRING AND CHILDCARE DISQUALIFICATION");
+    var teacherStatus = ParseTeacherStatus(teacherStatusText);
+    teacherStatus.QualifiedTeacherStatus ??= OrderedFieldParser.Parse(
+        ExtractBetween(contentText, "1. WORK ELIGIBILITY", "2. EMPLOYMENT HISTORY"), "Qualified Teacher Status:")
+        .GetValueOrDefault("Qualified Teacher Status:");
 
     return new ExtractedApplicationDocument
     {
@@ -35,7 +71,7 @@ static partial class PdfApplicationExtractor
       ProfessionalBodiesMembership = ParseProfessionalBodiesMembership(membershipLines),
       SupportingStatement = ParseSupportingStatement(supportingStatementLines),
       PartTimeOrJobShare = ParsePartTimeOrJobShare(flexibleWorkingText),
-      TeacherStatus = ParseTeacherStatus(teacherStatusText),
+      TeacherStatus = teacherStatus,
       AdditionalInformation = ParseAdditionalInformation(additionalInformationText),
     };
   }
@@ -101,27 +137,23 @@ static partial class PdfApplicationExtractor
 
     for (var index = 0; index < lines.Count; index++)
     {
-      if (LineEquals(lines[index], "Additional reasons for any gaps in your employment history:"))
+      if (LineEquals(lines[index], "Additional reasons for any gaps in your employment history:")
+          || LineEquals(lines[index], "Any additional gaps not shown above, please give start date, end date and reason:"))
       {
-        section.AdditionalReasons = index + 1 < lines.Count ? TextCleaning.NormalizeInline(lines[index + 1].Text) : null;
+        section.AdditionalReasons = TextCleaning.NormalizeParagraphText(lines.Skip(index + 1));
         break;
       }
 
-      if (!LineEquals(lines[index], "to"))
-      {
+      var datesIndex = LineEquals(lines[index], "to") ? index + 1 : index;
+      var datesMatch = datesIndex < lines.Count ? GapDatesPattern().Match(lines[datesIndex].Text) : Match.Empty;
+      if (!datesMatch.Success)
         continue;
-      }
 
       var gap = new EmploymentGap();
-      var dateLine = index + 1 < lines.Count ? lines[index + 1].Text : string.Empty;
-      var descriptionLine = index + 2 < lines.Count ? lines[index + 2].Text : string.Empty;
+      var descriptionLine = datesIndex + 1 < lines.Count ? lines[datesIndex + 1].Text : string.Empty;
 
-      var datesMatch = GapDatesPattern().Match(dateLine);
-      if (datesMatch.Success)
-      {
-        gap.StartDate = DateParsing.ParseMonthYear(datesMatch.Groups["start"].Value);
-        gap.EndDate = DateParsing.ParseMonthYear(datesMatch.Groups["end"].Value);
-      }
+      gap.StartDate = DateParsing.ParseMonthYear(datesMatch.Groups["start"].Value);
+      gap.EndDate = DateParsing.ParseMonthYear(datesMatch.Groups["end"].Value);
 
       var descriptorMatch = GapDescriptorPattern().Match(descriptionLine);
       if (descriptorMatch.Success)
@@ -131,12 +163,14 @@ static partial class PdfApplicationExtractor
       }
 
       var reasonLines = new List<DocumentLine>();
-      for (var reasonIndex = index + 3; reasonIndex < lines.Count; reasonIndex++)
+      for (var reasonIndex = datesIndex + 2; reasonIndex < lines.Count; reasonIndex++)
       {
         var reasonText = lines[reasonIndex].Text;
 
         if (TextEquals(reasonText, "to")
-            || TextEquals(reasonText, "Additional reasons for any gaps in your employment history:"))
+            || GapDatesPattern().IsMatch(reasonText)
+            || TextEquals(reasonText, "Additional reasons for any gaps in your employment history:")
+            || TextEquals(reasonText, "Any additional gaps not shown above, please give start date, end date and reason:"))
         {
           index = reasonIndex - 1;
           break;
@@ -218,7 +252,7 @@ static partial class PdfApplicationExtractor
 
       var record = new SecondaryEducationRecord
       {
-        SchoolCollege = GetPreviousValue(lines, schoolLabelIndex),
+        SchoolCollege = AppendWrappedValueContinuation(GetPreviousValue(lines, schoolLabelIndex), lines, schoolLabelIndex),
       };
 
       var datesIndex = FindLine(block, "Start Date: End Date:");
@@ -520,11 +554,13 @@ static partial class PdfApplicationExtractor
 
   private static TeacherStatusRecord ParseTeacherStatus(string sectionText)
   {
+    sectionText = Regex.Replace(sectionText, @"Expected\s*Date\s*of\s*Completion:", "Expected Completion:", RegexOptions.IgnoreCase);
     var fields = OrderedFieldParser.Parse(sectionText,
         "Qualified Teacher Status:",
         "Teacher Reference Number:",
+        "Date of Completion:",
         "Date Attained:",
-        "Expected Date of Completion:",
+        "Expected Completion:",
         "If you gained QTS after 7th May 1999, have you completed the statutory NQT / ECT induction period?:",
         "If you have an overseas teaching qualification, has this been recognised as meeting the same standards as qualified teacher status in England?:",
         "Are you subject to a teacher prohibition order, or an interim prohibition order, issued by the secretary of state, as a result of misconduct?:",
@@ -535,7 +571,7 @@ static partial class PdfApplicationExtractor
       QualifiedTeacherStatus = fields.GetValueOrDefault("Qualified Teacher Status:"),
       TeacherReferenceNumber = fields.GetValueOrDefault("Teacher Reference Number:"),
       DateAttained = DateParsing.ParseFlexibleDate(fields.GetValueOrDefault("Date Attained:")),
-      ExpectedDateOfCompletion = DateParsing.ParseFlexibleDate(fields.GetValueOrDefault("Expected Date of Completion:")),
+      ExpectedDateOfCompletion = DateParsing.ParseFlexibleDate(fields.GetValueOrDefault("Expected Completion:")),
       CompletedStatutoryInduction = ValueParsing.ParseYesNo(fields.GetValueOrDefault("If you gained QTS after 7th May 1999, have you completed the statutory NQT / ECT induction period?:")),
       OverseasQualificationRecognised = EmptyToNull(fields.GetValueOrDefault("If you have an overseas teaching qualification, has this been recognised as meeting the same standards as qualified teacher status in England?:")),
       SubjectToTeacherProhibitionOrder = ValueParsing.ParseYesNo(fields.GetValueOrDefault("Are you subject to a teacher prohibition order, or an interim prohibition order, issued by the secretary of state, as a result of misconduct?:")),
@@ -585,13 +621,16 @@ static partial class PdfApplicationExtractor
     return results;
   }
 
+  [GeneratedRegex(@"^(?<label>Employer:|Job Title:|Reason for Leaving:|Salary:|Institution:|Course:|Qualification:|Grade:|School/College:|Training Course/Title:|Organising Body:|Professional Body:|Membership Level:|Date:|Start Date:)\s*(?<value>.+)$", RegexOptions.IgnoreCase)]
+  private static partial Regex InlineFieldPattern();
+
   [GeneratedRegex(@"^\((?<duration>[^)]+?)\s+between\s+(?<between>.+)\)$", RegexOptions.IgnoreCase)]
   private static partial Regex GapDescriptorPattern();
 
-  [GeneratedRegex(@"^(?<start>(?:" + DateParsing.MonthPattern + @")\s+\d{4})\s+(?<end>(?:" + DateParsing.MonthPattern + @")\s+\d{4})$", RegexOptions.IgnoreCase)]
+  [GeneratedRegex(@"^(?<start>(?:" + DateParsing.MonthPattern + @")\s+\d{4})\s+(?:to\s+)?(?<end>(?:" + DateParsing.MonthPattern + @")\s+\d{4})$", RegexOptions.IgnoreCase)]
   private static partial Regex GapDatesPattern();
 
-  [GeneratedRegex(@"^(?<subject>.+?)\s+(?<grade>[A-Za-z0-9:./*+-]+)$")]
+  [GeneratedRegex(@"^(?<subject>.+?)\s+(?<grade>(?:[A-Za-z0-9:./*+-]+,\s*)+[A-Za-z0-9:./*+-]+|(?:[A-GUa-gu]\*?|\d+)\s*-\s*(?:[A-GUa-gu]\*?|\d+)|[A-Za-z0-9:./*+-]+)$")]
   private static partial Regex ResultLinePattern();
 
   [GeneratedRegex(@"^#(?=\d)")]

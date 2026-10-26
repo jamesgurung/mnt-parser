@@ -12,10 +12,12 @@ static partial class PdfApplicationExtractor
       return [];
     }
 
-    var endIndex = endMarker is null ? lines.Count : FindLine(lines, endMarker);
+    var endIndex = endMarker is null ? lines.Count : lines.FindIndex(startIndex + 1, line => LineEquals(line, endMarker));
     if (endIndex < 0)
     {
-      endIndex = lines.Count;
+      endIndex = lines.FindIndex(startIndex + 1, line => NumberedSectionHeadingPattern().IsMatch(line.Text));
+      if (endIndex < 0)
+        endIndex = lines.Count;
     }
 
     var sliceStart = Math.Min(startIndex + 1, lines.Count);

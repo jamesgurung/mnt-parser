@@ -120,11 +120,6 @@ static partial class TextCleaning
         startsNewSegment = StartsNewParagraph(previous, line, baselineGap);
       }
 
-      if (mode == SegmentMode.Structured && !startsNewSegment && StartsImplicitListItem(current, line))
-      {
-        startsListItem = true;
-        startsNewSegment = true;
-      }
 
       if (!startsNewSegment)
       {
@@ -245,51 +240,6 @@ static partial class TextCleaning
   private static bool IsListItem(string text)
   {
     return ListItemPattern.IsMatch(text);
-  }
-
-  private static bool StartsImplicitListItem(IReadOnlyList<PreparedLine> currentSegment, PreparedLine nextLine)
-  {
-    if (currentSegment.Count == 0)
-    {
-      return false;
-    }
-
-    var previous = currentSegment[^1].Text;
-    if (!LooksLikeImplicitListLine(nextLine.Text) && !LooksLikeImplicitListHeading(nextLine.Text))
-    {
-      return false;
-    }
-
-    if (currentSegment.Count == 1 && previous.EndsWith(':'))
-    {
-      return true;
-    }
-
-    if (currentSegment.Count == 1 && LooksLikeImplicitListLine(previous) && LooksLikeImplicitListHeading(nextLine.Text))
-    {
-      return true;
-    }
-
-    return currentSegment.Count == 1
-        && LooksLikeImplicitListLine(previous)
-        && !EndsSentence(previous)
-        && !EndsSentence(nextLine.Text);
-  }
-
-  private static bool LooksLikeImplicitListLine(string text)
-  {
-    return !string.IsNullOrWhiteSpace(text)
-        && text.Length <= 120
-        && char.IsUpper(text[0])
-        && !LooksLikeStandaloneHeading(text);
-  }
-
-  private static bool LooksLikeImplicitListHeading(string text)
-  {
-    return !string.IsNullOrWhiteSpace(text)
-        && text.Length <= 120
-        && char.IsUpper(text[0])
-        && text.EndsWith(':');
   }
 
   private static bool LooksLikeStandaloneHeading(string text)
